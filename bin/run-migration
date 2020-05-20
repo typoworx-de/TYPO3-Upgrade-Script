@@ -3,7 +3,15 @@
 # Relative Path to our Document-Root
 typo3version=7;
 docRelPath='../src/site';
+
+runAsHttpUser=1;
+httpUser='www-data'
 httpUserGroup='www-data:www-data';
+
+[ ${runAsHttpUser} -eq 1 ] && [ "$USER" != "${httpUser}" ] && {
+  echo "Sudo'ing as ${httpUser}";
+  sudo su - "${httpUser}" -c $(pwd)/${0} ${@: -1};
+}
 
 #---------------------------------------------------------------
 _pid=$$;
@@ -137,7 +145,7 @@ flushTypo3Cache;
 
 # Check if last Reference-Index update isn't too old
 [ ! -f "${docRoot}/typo3temp/updatereferenceindex.stat" ] || \
-[ $(stat --format=%Y "${docRoot}/typo3temp/updatereferenceindex.stat") -le $(( `date +%s` - 1800 )) ] && {
+[ $(stat --format=%Y "${docRoot}/typo3temp/updatereferenceindex.stat") -le $(( `date +%s` - 3600 )) ] && {
   runWizard cleanup:updatereferenceindex;
 }
 
