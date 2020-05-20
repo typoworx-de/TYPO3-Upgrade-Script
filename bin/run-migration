@@ -1,0 +1,215 @@
+#!/bin/bash
+
+# Relative Path to our Document-Root
+typo3version=7;
+docRelPath='../src/site';
+httpUserGroup='www-data:www-data';
+
+#---------------------------------------------------------------
+_pid=$$;
+runDir=$(dirname $0);
+docRoot=$(realpath "${runDir}/${docRelPath}");
+php=$(which php7.{2,1,0} | head -n 1);
+
+
+source ${runDir}/bashelor.inc.sh;
+
+# Check typo3_console & typo3cms exists
+typo3consoleBin="${docRoot}/typo3conf/ext/typo3_console/typo3cms";
+[[ -f "${typo3consoleBin}" ]] || {
+  # older typo3_console has the script in Scripts/ subfolder
+  [[ -f "${docRoot}/typo3conf/ext/typo3_console/Scripts/typo3cms" ]] && {
+    typo3consoleBin="${docRoot}/typo3conf/ext/typo3_console/Scripts/typo3cms";
+  } || {
+    typo3consoleBin='';
+  }
+}
+
+[[ -f "${typo3consoleBin}" ]] || {
+  echo "Please install TYPO3 Extension typo3_console first!";
+  exit 1;
+}
+
+#if [[ -z "${TYPO3_CONTEXT}" && -f "${runDir}../.env" ]];
+#then
+#  echo "Loading Environment from ${runDir}../.env";
+#  $(cat "${runDir}../.env") $0 $@;
+#  exit $?;
+#fi
+
+function forceExit()
+{
+    runWizardCareful backend:unlock
+    kill "${_pid}";
+}
+
+function flushTypo3Cache()
+{
+    message info 'Purging typo3temp/';
+    rm -rf "${docRoot}/typo3temp/*" || { message error 'failed'; exit 1; }
+    mkdir -p "${docRoot}/typo3temp/var/logs";
+    #chown -R "${httpUserGroup}" "${docRoot}/typo3temp/";
+    #chmod -R 2775 "${docRoot}/typo3temp/";
+    echo;
+}
+
+function typo3_cli()
+{
+    message info "Executing TYPO3 CLI: typo3 $@";
+    if [[ -f "${docRoot}/typo3/sysext/core/bin/typo3" ]];
+    then
+        (cd "${docRoot}"; ${php7} "typo3/sysext/core/bin/typo3" -vvv $@) || {
+            message error "Error running typo3/sysext/core/bin/typo3 ${@}!";
+            return 1;
+        };
+    fi
+}
+
+function typo3_cliCareful()
+{
+    [[ "${typo3version}" -ge 9 ]] || exit;
+
+    message info "Executing TYPO3 CLI: typo3 $@";
+    if [[ -f "${docRoot}/typo3/sysext/core/bin/typo3" ]];
+    then
+        (cd "${docRoot}"; ${php7} "typo3/sysext/core/bin/typo3" -vvv $@) || {
+            message error "Error running typo3/sysext/core/bin/typo3 ${@}!";
+            forceExit;
+        };
+    fi
+}
+
+function runWizard()
+{
+    [[ $(${php} ${typo3consoleBin} | grep -c "${1}") > 0 ]] || {
+        message warn "Skipping task ${1} does not exist!"; return 1;
+        echo;
+        return 1;
+    }
+
+    message info "Running Wizard ${@}";
+
+    ${php} ${typo3consoleBin} $@ --verbose || {
+        message error "Error running ${@}!"; return 1;
+    };
+
+    echo;
+    return 0;
+}
+
+function runWizardCareful()
+{
+    [[ $(${php} ${typo3consoleBin} | grep -c "${1}") > 0 ]] || {
+        message warn "Skipping task ${1} does not exist!"; return 1;
+        echo;
+        return 1;
+    }
+
+    message info "Running Wizard ${@}";
+
+    ${php} ${typo3consoleBin} $@ --verbose || {
+        message error "Error running ${@}!"; return 1;
+    };
+
+    echo;
+    return 0;
+}
+
+typo3VersionString=$(typo3_cli -V | grep -Eo "TYPO3 CMS [0-9\.]+")
+typo3VersionString=${typo3VersionString/TYPO3 CMS/}
+declare -i typo3MajorVersion=${typo3VersionString:0:2}
+
+[ "${typo3MajorVersion}" -gt 0 ] \
+  && {
+    typo3version="${typo3MajorVersion}";
+} || {
+  message error "Detecting TYPO3-Version!";
+}
+
+[[ "${typo3version}" -ge 9 ]] && {
+    message info "Detected TYPO3 >=9.0";
+} || {
+    message info "Detected TYPO3 =< 8.9";
+}
+
+# Generic File-Based Cache-Flush
+flushTypo3Cache;
+
+# Check if last Reference-Index update isn't too old
+[ ! -f "${docRoot}/typo3temp/updatereferenceindex.stat" ] || \
+[ $(stat --format=%Y "${docRoot}/typo3temp/updatereferenceindex.stat") -le $(( `date +%s` - 1800 )) ] && {
+  runWizard cleanup:updatereferenceindex;
+}
+
+# Pre Wizards
+[[ "${typo3version}" -ge 9 ]] && {
+    typo3_cliCareful backend:lock;
+    runWizardCareful install:fixfolderstructure;
+    typo3_cliCareful dumpautoload;
+} || {
+    runWizardCareful backend:lock;
+    runWizardCareful cache:flush;
+    runWizardCareful install:fixfolderstructure;
+    runWizardCareful dumpautoload;
+}
+
+# Migrations avoiding any drop-actions!
+[[ "${typo3version}" -ge 9 ]] && {
+    runWizardCareful database:updateschema '*.add,*.change';
+    #-typo3_cli upgrade:run -vv --no-interaction -> runWizardCareful upgrade:all has more controls!
+    runWizardCareful upgrade:all --arguments adodb[install]=0,dbal[install]=0,typo3db_legacy[install]=0,func[install]=1,rtehtmlarea[install]=0,argon2i[install]=1,realurlAliasNewsSlug[install]=1;
+} || {
+    runWizardCareful database:updateschema '*.add,*.change';
+    runWizardCareful upgrade:all --arguments compatibility7[install]=0,adodb[install]=0,dbal[install]=0;
+}
+
+runWizard cache:flush;
+
+# Post Wizards
+if [[ "${typo3version}" -ge 9 ]];
+then
+    # TYPO3 v9 Clean-Up some deprecated stuff
+    for extKey in realurl func rtehtmlarea typo3db_legacy dbal adodb;
+    do
+        typo3_cli extension:uninstall -q "${extKey}";
+
+        # Remove Configuration from LocalConfiguration.php
+        runWizard configuration:remove "EXT/EXTCONF/${extKey}";
+    done
+
+    # Clean-Up some bad extensions
+    for extKey in typo3db_legacy dbal adodb;
+    do
+        [[ -d "${docRoot}/typo3conf/ext/${extKey}" ]] && {
+            message info "Deleting typo3conf/ext/${extKey}.";
+            rm -rf "${docRoot}/typo3conf/ext/${extKey}";
+        }
+    done
+
+    # TYPO3 v9 Core-Packages
+    for extKey in beuser belog adminpanel setup info t3editor;
+    do
+        typo3_cli extension:install "${extKey}";
+    done
+
+    # TYPO3 v9 Core-Extra-Packages
+    for extKey in lowlevel redirects reports seo;
+    do
+        typo3_cli extension:install "${extKey}";
+    done
+
+    typo3_cliCareful language:update;
+    typo3_cliCareful backend:unlock;
+else
+    runWizardCareful language:update;
+    runWizardCareful backend:unlock;
+fi
+
+message info "Backend is ready to be used!";
+
+echo;
+echo;
+message info "Updates done";
+echo;
+
+exit;
